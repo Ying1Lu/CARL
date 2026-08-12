@@ -71,184 +71,84 @@ python test_carl_ssl.py
 
 **重要:** SSL チェックポイントはエンコーダのみ。セグメンテーションには **GTマスク付きデータで Fine-tuning（Linear Probing）** が必要。
 
-### Step 1: データセットクラスの作成
+### Step 1: データセットクラス（実装済み）
 
-`carl/data/HSIRS.py` を作成する:
-
-```python
-"""HSIRS 33-band hyperspectral segmentation dataset."""
-import numpy as np
-import torch
-from pathlib import Path
-from torch.utils.data import Dataset
-
-NORMALIZATION_EPSILON = 1e-6
-
-class HSIRS(Dataset):
-    """HSIRS 33-band dataset for semantic segmentation.
-    
-    期待するディレクトリ構造:
-        root_dir/
-        ├── images/       # .npy files, shape (33, H, W)
-        ├── labels/       # .npy files, shape (H, W), class IDs [0, n_classes-1]
-        └── wavelengths.npy  # shape (33,), 波長 [μm] 単位
-    """
-    
-    def __init__(self, root_dir: str, split: str = 'train', cfg=None):
-        self.root_dir = Path(root_dir) / split
-        self.cfg = cfg
-        self.n_classes = cfg['model_kwargs']['n_classes']
-        
-        self.image_files = sorted((self.root_dir / 'images').glob('*.npy'))
-        self.label_files = sorted((self.root_dir / 'labels').glob('*.npy'))
-        
-        # 波長情報 (μm単位)
-        wl_path = Path(root_dir) / 'wavelengths.npy'
-        self.wavelengths = np.load(wl_path).astype(np.float32)
-        
-        assert len(self.image_files) == len(self.label_files), \
-            f"画像数 {len(self.image_files)} != ラベル数 {len(self.label_files)}"
-    
-    def __len__(self):
-        return len(self.image_files)
-    
-    def __getitem__(self, idx):
-        img = np.load(self.image_files[idx]).astype(np.float32)  # (33, H, W)
-        label = np.load(self.label_files[idx]).astype(np.int64)  # (H, W)
-        
-        # Per-image normalization
-        mean, std = img.mean(), img.std()
-        img = (img - mean) / (std + NORMALIZATION_EPSILON)
-        
-        img_tensor = torch.from_numpy(img)
-        wl_tensor = torch.from_numpy(self.wavelengths.copy())
-        label_tensor = torch.from_numpy(label)
-        
-        return img_tensor, wl_tensor, label_tensor
-```
-
-### Step 2: 設定ファイルの作成
-
-`configs/config_seg_hsirs.yaml`:
-
-```yaml
-model_kwargs:
-  patch_size: 8
-  image_size: 128          # 画像を128×128にリサイズ or クロップ
-  n_classes: 5             # ← HSIRSのクラス数に合わせて変更
-  spec_encoder_kwargs:
-    embed_dim: 384
-    depth: 8
-    num_heads: 6
-    layer_scale: 0.0001
-    pos_enc_sigma: 3
-    n_queries: 8
-    qkv_bias: true
-    ffn_bias: true
-    drop_path_rate: 0.
-    proj_drop: 0.
-    drop: 0.
-    attn_drop: 0.
-  spat_encoder_kwargs:
-    model_name: timm/eva02_base_patch14_224.mim_in22k
-    depth: 8
-    model_kwargs:
-      drop_rate: 0.
-      pos_drop_rate: 0.
-      patch_drop_rate: 0.
-      proj_drop_rate: 0.
-      attn_drop_rate: 0.
-      drop_path_rate: 0.
-
-data_kwargs:
-  train_dataset:
-    name: HSIRS
-    root_dir: /path/to/hsirs_dataset    # ← 実際のパスに変更
-    split: train
-  val_dataset:
-    name: HSIRS
-    root_dir: /path/to/hsirs_dataset
-    split: val
-  test_dataset:
-    name: HSIRS
-    root_dir: /path/to/hsirs_dataset
-    split: test
-
-training_kwargs:
-  batch_size: 16
-  num_workers: 4
-  ssl_ckpt_path: carl_ssl_checkpoint.ckpt
-  monitor_metric: val_mIoU
-  log_dir: logs/hsirs_seg
-  learning_rate: 1e-3
-
-lightning_kwargs:
-  max_epochs: 50
-  accelerator: gpu
-  devices: 1
-  precision: bf16-mixed
-  check_val_every_n_epoch: 5
-  log_every_n_steps: 10
-  enable_checkpointing: true
-  num_sanity_val_steps: 0
-  enable_progress_bar: true
-```
-
-### Step 3: データの準備
-
-HSIRSデータを以下のフォルダ構造に変換:
+`carl/data/HSIRS.py` — ネットワーク共有から直接読み込み対応済み。
 
 ```
-hsirs_dataset/
-├── wavelengths.npy          # shape (33,), μm単位 例: [0.40, 0.42, ..., 1.00]
-├── train/
-│   ├── images/              # {scene_id}.npy  shape (33, 128, 128)
-│   └── labels/              # {scene_id}.npy  shape (128, 128)
-├── val/
-│   ├── images/
-│   └── labels/
-└── test/
-    ├── images/
-    └── labels/
+データソース: \\43.3.248.92\euispc\mactis\dataset\HSIRS_public
+├── 592シーン (食品: Baquette, Bread, Donut, Banana, Apple, Lemon, Orange...)
+├── 各シーン/
+│   ├── {scene}_{474..698}_nm.png  (33バンド, 2048×2048, uint8)
+│   ├── {scene}_seg_map.png        (GTマスク, 42クラス, uint8)
+│   └── {scene}_rgb.png            (RGB参照)
+└── 自動分割: 414 train / 88 val / 90 test (70/15/15)
 ```
 
-> **注意:** 波長は必ず **マイクロメートル (μm)** 単位で指定すること。  
-> 例: 400nm → 0.40μm, 1000nm → 1.00μm
+データの前処理不要 — PNG画像を直接読み込み、128×128にランダムクロップ→正規化。
 
-### Step 4: 学習の実行
+### Step 2: 設定ファイル（実装済み）
+
+`configs/config_seg_hsirs.yaml` — 42クラス、ネットワーク共有パス設定済み。
+
+主要設定:
+| パラメータ | 値 | 説明 |
+|---|---|---|
+| n_classes | 42 | 食品セグメンテーション (0-41) |
+| image_size | 128 | ランダムクロップ後のサイズ |
+| root_dir | `\\43.3.248.92\euispc\mactis\dataset\HSIRS_public` | データパス |
+| ssl_ckpt_path | `carl_ssl_checkpoint.ckpt` | SSL事前学習エンコーダ |
+| max_epochs | 50 | Linear Probing (収束が速い) |
+
+### Step 3: 学習の実行
 
 ```powershell
 python main_seg.py --config configs/config_seg_hsirs.yaml
 ```
 
-### Step 5: 推論・GT比較
+### Step 4: 推論・GT比較
 
 学習後、`logs/hsirs_seg/` に best checkpoint が保存される。  
 推論スクリプト例:
 
 ```python
 import torch
-import numpy as np
+from carl.data.HSIRS import HSIRS
 from carl.trainer.seg_trainer import LinearTrainer
 from carl.config import load_config
 
 config = load_config("configs/config_seg_hsirs.yaml")
 model = LinearTrainer.load_from_checkpoint("logs/hsirs_seg/.../best.ckpt", config=config)
-model.eval()
-model.cuda()
+model.eval().cuda()
 
-# 推論
-img = torch.from_numpy(np.load("test_image.npy")).unsqueeze(0).cuda()   # (1,33,128,128)
-wl  = torch.from_numpy(np.load("wavelengths.npy")).unsqueeze(0).cuda()  # (1,33)
+# データセットからサンプル取得
+ds = HSIRS(root_dir=r"\\43.3.248.92\euispc\mactis\dataset\HSIRS_public", split="test", cfg=config)
+img, wl, gt_label = ds[0]
 
 with torch.no_grad():
-    spatial_feat, _ = model.model(img, wl)
-    pred = model.classifier(spatial_feat)             # (1, n_classes, 16, 16)
+    spatial_feat, _ = model.model(img.unsqueeze(0).cuda(), wl.unsqueeze(0).cuda())
+    pred = model.classifier(spatial_feat)             # (1, 42, 16, 16)
     pred_mask = pred.argmax(dim=1)                     # (1, 16, 16)
-    # Upsample to original size
+    # Upsample to crop size
     pred_mask = torch.nn.functional.interpolate(
-        pred_mask.unsqueeze(1).float(), size=(128,128), mode='nearest'
-    ).squeeze().long()
+        pred_mask.unsqueeze(1).float(), size=(128, 128), mode='nearest'
+    ).squeeze().long().cpu()
+
+# GT比較
+from torchmetrics import JaccardIndex
+miou = JaccardIndex(task="multiclass", num_classes=42)(pred_mask, gt_label)
+print(f"mIoU: {miou:.4f}")
+```
+
+### 動作確認済みテスト結果
+
+```
+Val set: 88 scenes
+Image:  torch.Size([33, 128, 128])
+WL:     torch.Size([33])  [0.474, 0.481, ..., 0.698] μm
+Spatial out:  torch.Size([1, 768, 16, 16])
+Seg output:   torch.Size([1, 42, 16, 16])
+✅ HSIRS → CARL → Segmentation pipeline OK
 ```
 
 ---
