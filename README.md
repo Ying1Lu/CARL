@@ -1,4 +1,53 @@
-# CARL
+# CARL (Sony インターン用フォーク)
+
+> **目的:** ZenSa（自社モデル）と CARL の比較実験を行うためのフォークです。  
+> オリジナル: https://github.com/IMSY-DKFZ/CARL
+
+---
+
+## 🚀 クイックセットアップ (Windows)
+
+```powershell
+# 1. クローン
+git clone https://github.com/Ying1Lu/CARL.git
+cd CARL
+
+# 2. 仮想環境作成
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 3. PyTorch (CUDA 12.1) インストール
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 4. 依存パッケージ
+pip install -r requirements.txt
+pip install geobench --no-deps
+
+# 5. SSL事前学習チェックポイントのダウンロード (1.33 GB)
+#    ※ urllib/python-wgetは途中で切断されることがあるため curl 推奨
+curl.exe -L -C - --retry 10 --retry-all-errors --retry-delay 5 -o carl_ssl_checkpoint.ckpt "https://zenodo.org/records/18671944/files/ssl_checkpoint_carl.ckpt"
+```
+
+### 動作確認テスト
+
+```powershell
+# チェックポイント不要 — モデル構築 + 7/33band推論 + GPU確認
+python test_carl_basic.py
+
+# SSL事前学習済み重みのロード + 推論（要 carl_ssl_checkpoint.ckpt）
+python test_carl_ssl.py
+```
+
+### 確認済み環境
+| 項目 | バージョン |
+|------|-----------|
+| Python | 3.10 |
+| PyTorch | 2.5.1+cu121 |
+| timm | 1.0.28 |
+| pytorch-lightning | 2.6.5 |
+| GPU | RTX 4070 Ti SUPER (327 MB / 453 MB peak) |
+
+---
 
 [![arXiv](https://img.shields.io/badge/arXiv-2504.19223-b31b1b.svg)](https://arxiv.org/abs/2504.19223)
 [![Conference](https://img.shields.io/badge/ICLR-2026-blue)](https://iclr.cc/virtual/2026/poster/10009281)
