@@ -49,6 +49,210 @@ python test_carl_ssl.py
 
 ---
 
+## 🎯 HSIRS (33band) でセグメンテーションを行う手順
+
+### 概要
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  SSL事前学習済みエンコーダ (carl_ssl_checkpoint.ckpt)     │
+│  → Spectral Encoder + Spatial Encoder  [frozen]         │
+└───────────────────────────┬─────────────────────────────┘
+                            │ 特徴マップ [B, 768, H/8, W/8]
+                            ▼
+┌─────────────────────────────────────────────────────────┐
+│  セグメンテーションヘッド (Conv2d 1×1)  [trainable]      │
+│  → n_classes チャンネルに射影                             │
+└───────────────────────────┬─────────────────────────────┘
+                            │
+                            ▼
+                  セグメンテーションマスク出力
+```
+
+**重要:** SSL チェックポイントはエンコーダのみ。セグメンテーションには **GTマスク付きデータで Fine-tuning（Linear Probing）** が必要。
+
+### Step 1: データセットクラスの作成
+
+`carl/data/HSIRS.py` を作成する:
+
+```python
+"""HSIRS 33-band hyperspectral segmentation dataset."""
+import numpy as np
+import torch
+from pathlib import Path
+from torch.utils.data import Dataset
+
+NORMALIZATION_EPSILON = 1e-6
+
+class HSIRS(Dataset):
+    """HSIRS 33-band dataset for semantic segmentation.
+    
+    期待するディレクトリ構造:
+        root_dir/
+        ├── images/       # .npy files, shape (33, H, W)
+        ├── labels/       # .npy files, shape (H, W), class IDs [0, n_classes-1]
+        └── wavelengths.npy  # shape (33,), 波長 [μm] 単位
+    """
+    
+    def __init__(self, root_dir: str, split: str = 'train', cfg=None):
+        self.root_dir = Path(root_dir) / split
+        self.cfg = cfg
+        self.n_classes = cfg['model_kwargs']['n_classes']
+        
+        self.image_files = sorted((self.root_dir / 'images').glob('*.npy'))
+        self.label_files = sorted((self.root_dir / 'labels').glob('*.npy'))
+        
+        # 波長情報 (μm単位)
+        wl_path = Path(root_dir) / 'wavelengths.npy'
+        self.wavelengths = np.load(wl_path).astype(np.float32)
+        
+        assert len(self.image_files) == len(self.label_files), \
+            f"画像数 {len(self.image_files)} != ラベル数 {len(self.label_files)}"
+    
+    def __len__(self):
+        return len(self.image_files)
+    
+    def __getitem__(self, idx):
+        img = np.load(self.image_files[idx]).astype(np.float32)  # (33, H, W)
+        label = np.load(self.label_files[idx]).astype(np.int64)  # (H, W)
+        
+        # Per-image normalization
+        mean, std = img.mean(), img.std()
+        img = (img - mean) / (std + NORMALIZATION_EPSILON)
+        
+        img_tensor = torch.from_numpy(img)
+        wl_tensor = torch.from_numpy(self.wavelengths.copy())
+        label_tensor = torch.from_numpy(label)
+        
+        return img_tensor, wl_tensor, label_tensor
+```
+
+### Step 2: 設定ファイルの作成
+
+`configs/config_seg_hsirs.yaml`:
+
+```yaml
+model_kwargs:
+  patch_size: 8
+  image_size: 128          # 画像を128×128にリサイズ or クロップ
+  n_classes: 5             # ← HSIRSのクラス数に合わせて変更
+  spec_encoder_kwargs:
+    embed_dim: 384
+    depth: 8
+    num_heads: 6
+    layer_scale: 0.0001
+    pos_enc_sigma: 3
+    n_queries: 8
+    qkv_bias: true
+    ffn_bias: true
+    drop_path_rate: 0.
+    proj_drop: 0.
+    drop: 0.
+    attn_drop: 0.
+  spat_encoder_kwargs:
+    model_name: timm/eva02_base_patch14_224.mim_in22k
+    depth: 8
+    model_kwargs:
+      drop_rate: 0.
+      pos_drop_rate: 0.
+      patch_drop_rate: 0.
+      proj_drop_rate: 0.
+      attn_drop_rate: 0.
+      drop_path_rate: 0.
+
+data_kwargs:
+  train_dataset:
+    name: HSIRS
+    root_dir: /path/to/hsirs_dataset    # ← 実際のパスに変更
+    split: train
+  val_dataset:
+    name: HSIRS
+    root_dir: /path/to/hsirs_dataset
+    split: val
+  test_dataset:
+    name: HSIRS
+    root_dir: /path/to/hsirs_dataset
+    split: test
+
+training_kwargs:
+  batch_size: 16
+  num_workers: 4
+  ssl_ckpt_path: carl_ssl_checkpoint.ckpt
+  monitor_metric: val_mIoU
+  log_dir: logs/hsirs_seg
+  learning_rate: 1e-3
+
+lightning_kwargs:
+  max_epochs: 50
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  check_val_every_n_epoch: 5
+  log_every_n_steps: 10
+  enable_checkpointing: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+```
+
+### Step 3: データの準備
+
+HSIRSデータを以下のフォルダ構造に変換:
+
+```
+hsirs_dataset/
+├── wavelengths.npy          # shape (33,), μm単位 例: [0.40, 0.42, ..., 1.00]
+├── train/
+│   ├── images/              # {scene_id}.npy  shape (33, 128, 128)
+│   └── labels/              # {scene_id}.npy  shape (128, 128)
+├── val/
+│   ├── images/
+│   └── labels/
+└── test/
+    ├── images/
+    └── labels/
+```
+
+> **注意:** 波長は必ず **マイクロメートル (μm)** 単位で指定すること。  
+> 例: 400nm → 0.40μm, 1000nm → 1.00μm
+
+### Step 4: 学習の実行
+
+```powershell
+python main_seg.py --config configs/config_seg_hsirs.yaml
+```
+
+### Step 5: 推論・GT比較
+
+学習後、`logs/hsirs_seg/` に best checkpoint が保存される。  
+推論スクリプト例:
+
+```python
+import torch
+import numpy as np
+from carl.trainer.seg_trainer import LinearTrainer
+from carl.config import load_config
+
+config = load_config("configs/config_seg_hsirs.yaml")
+model = LinearTrainer.load_from_checkpoint("logs/hsirs_seg/.../best.ckpt", config=config)
+model.eval()
+model.cuda()
+
+# 推論
+img = torch.from_numpy(np.load("test_image.npy")).unsqueeze(0).cuda()   # (1,33,128,128)
+wl  = torch.from_numpy(np.load("wavelengths.npy")).unsqueeze(0).cuda()  # (1,33)
+
+with torch.no_grad():
+    spatial_feat, _ = model.model(img, wl)
+    pred = model.classifier(spatial_feat)             # (1, n_classes, 16, 16)
+    pred_mask = pred.argmax(dim=1)                     # (1, 16, 16)
+    # Upsample to original size
+    pred_mask = torch.nn.functional.interpolate(
+        pred_mask.unsqueeze(1).float(), size=(128,128), mode='nearest'
+    ).squeeze().long()
+```
+
+---
+
 [![arXiv](https://img.shields.io/badge/arXiv-2504.19223-b31b1b.svg)](https://arxiv.org/abs/2504.19223)
 [![Conference](https://img.shields.io/badge/ICLR-2026-blue)](https://iclr.cc/virtual/2026/poster/10009281)
 
