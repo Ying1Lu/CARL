@@ -57,3 +57,7 @@ venv.bak/
 
 .idea/
 .vscode/
+# Large checkpoint files
+*.ckpt
+*.ckpt*.tmp
+.venv/
