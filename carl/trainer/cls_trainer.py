@@ -89,6 +89,13 @@ class LinearTrainer(pl.LightningModule):
         """Freeze all CARL model parameters."""
         for param in self.model.parameters():
             param.requires_grad = False
+        self.model.eval()
+
+    def train(self, mode: bool = True) -> "LinearTrainer":
+        """Set trainer mode while keeping the frozen CARL backbone in eval mode."""
+        super().train(mode)
+        self.model.eval()
+        return self
 
     def _build_augmentation_pipeline(self) -> K.AugmentationSequential:
         """Build data augmentation pipeline for classification.
@@ -173,6 +180,18 @@ class LinearTrainer(pl.LightningModule):
                 - labels: Target class labels of shape (B,)
             batch_idx: Index of the current batch.
         """
+        self._evaluation_step(batch)
+
+    def test_step(
+        self,
+        batch: Tuple[Tensor, Tensor, Tensor],
+        batch_idx: int,
+    ) -> None:
+        """Evaluate one test batch."""
+        self._evaluation_step(batch)
+
+    def _evaluation_step(self, batch: Tuple[Tensor, Tensor, Tensor]) -> None:
+        """Update the evaluation metric for one batch."""
         img, wavelengths, labels = batch
         
         # Ensure correct dtype
@@ -203,8 +222,16 @@ class LinearTrainer(pl.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         """Compute and log metrics at the end of validation epoch."""
+        self._log_evaluation_metric("val")
+
+    def on_test_epoch_end(self) -> None:
+        """Compute and log metrics at the end of the test epoch."""
+        self._log_evaluation_metric("test")
+
+    def _log_evaluation_metric(self, prefix: str) -> None:
+        """Compute, log, and reset the evaluation metric."""
         acc = self.accuracy.compute()
-        self.log("val_accuracy", acc, on_epoch=True)
+        self.log(f"{prefix}_accuracy", acc, on_epoch=True)
         self.accuracy.reset()
 
     def configure_optimizers(self) -> Tuple[list, list]:

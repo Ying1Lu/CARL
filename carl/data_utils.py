@@ -110,7 +110,13 @@ def create_dataloaders(
     """
     training_config = config["training_kwargs"]
     batch_size = training_config["batch_size"]
+    evaluation_batch_size = training_config.get(
+        "evaluation_batch_size", batch_size
+    )
     num_workers = training_config["num_workers"]
+    evaluation_num_workers = training_config.get(
+        "evaluation_num_workers", num_workers
+    )
     
     if isinstance(train_dataset, list):
         train_dataloader = MultiDataLoader(
@@ -142,9 +148,9 @@ def create_dataloaders(
     val_dataloader = [
         DataLoader(
             ds,
-            batch_size=batch_size,
+            batch_size=evaluation_batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=evaluation_num_workers,
             pin_memory=True,
         ) for ds in val_dataset
     ]
@@ -154,9 +160,9 @@ def create_dataloaders(
     else:
         test_dataloader = DataLoader(
             test_dataset,
-            batch_size=batch_size,
+            batch_size=evaluation_batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=evaluation_num_workers,
             pin_memory=True,
         )
     

@@ -29,37 +29,24 @@ model_kwargs:
 data_kwargs:
   train_dataset:
     name: HSIRS
-    root_dir: "/home/onishi/00_intern_prog/data/HSIRS_public"
+    root_dir: "\\\\43.3.248.92\\euispc\\mactis\\dataset\\HSIRS_public"
     split: train
-    foreground_crop_probability: 0.8
-    foreground_crop_seed: 42
-    background_label: 0
   val_dataset:
     name: HSIRS
-    root_dir: "/home/onishi/00_intern_prog/data/HSIRS_public"
+    root_dir: "\\\\43.3.248.92\\euispc\\mactis\\dataset\\HSIRS_public"
     split: val
   test_dataset:
     name: HSIRS
-    root_dir: "/home/onishi/00_intern_prog/data/HSIRS_public"
+    root_dir: "\\\\43.3.248.92\\euispc\\mactis\\dataset\\HSIRS_public"
     split: test
 
 training_kwargs:
-  batch_size: 4
-  evaluation_batch_size: 1
+  batch_size: 16
   num_workers: 4
-  evaluation_num_workers: 0
   ssl_ckpt_path: carl_ssl_checkpoint.ckpt
-  monitor_metric: val_foreground_mIoU
+  monitor_metric: val_mIoU
   log_dir: logs/hsirs_seg
   learning_rate: 1e-3
-  random_resized_crop: false
-
-metric_kwargs:
-  background_label: 0
-
-evaluation_kwargs:
-  tile_size: 128
-  tile_batch_size: 16
 
 lightning_kwargs:
   max_epochs: 50

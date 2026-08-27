@@ -146,10 +146,10 @@ def main(config_path: str) -> None:
     
     trainer = PLTrainer(**lightning_kwargs)
     
-    # Run validation (or training if uncommented)
+    # Train and evaluate the best checkpoint on the test split
     trainer.fit(model, train_dataloader, val_dataloader)
     best_model_path = trainer.checkpoint_callback.best_model_path
-    trainer.validate(model, test_dataloader, ckpt_path=best_model_path)
+    trainer.test(model, test_dataloader, ckpt_path=best_model_path)
 
 
 if __name__ == "__main__":
