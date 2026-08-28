@@ -40,7 +40,7 @@ def create_datasets(config: Dict[str, Any]) -> Tuple[Dataset, Dataset, Dataset]:
     data_config = config["data_kwargs"]
     
     if isinstance(data_config["train_dataset"], dict):
-        kwargs = data_config["train_dataset"]
+        kwargs = data_config["train_dataset"].copy()
         dataset_name = kwargs.pop("name")
         dataset_class = load_dataset_class(dataset_name)
         train_dataset = dataset_class(
@@ -59,7 +59,7 @@ def create_datasets(config: Dict[str, Any]) -> Tuple[Dataset, Dataset, Dataset]:
             train_dataset.append(ds)
 
     if isinstance(data_config["val_dataset"], dict):
-        kwargs = data_config["val_dataset"]
+        kwargs = data_config["val_dataset"].copy()
         dataset_name = kwargs.pop("name")
         dataset_class = load_dataset_class(dataset_name)
         val_dataset = dataset_class(
@@ -78,7 +78,7 @@ def create_datasets(config: Dict[str, Any]) -> Tuple[Dataset, Dataset, Dataset]:
             val_dataset.append(ds)
     
     if "test_dataset" in data_config:
-        kwargs = data_config["test_dataset"]
+        kwargs = data_config["test_dataset"].copy()
         dataset_name = kwargs.pop("name")
         dataset_class = load_dataset_class(dataset_name)
         test_dataset = dataset_class(

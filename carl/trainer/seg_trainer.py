@@ -1,7 +1,7 @@
 """Semantic segmentation trainer using CARL model with PyTorch Lightning.
 
-This module implements a Lightning trainer for fine-tuning the CARL model's 
-classification head for semantic segmentation tasks on spectral imagery.
+This module implements a Lightning trainer for linear probing or fine-tuning
+the CARL model for semantic segmentation tasks on spectral imagery.
 """
 
 from typing import Tuple, Dict, Any
@@ -27,13 +27,13 @@ class LinearTrainer(pl.LightningModule):
     """PyTorch Lightning trainer for CARL semantic segmentation.
     
     This trainer:
-    - Freezes the pre-trained CARL model parameters
-    - Trains only a small classification head on top
+    - Optionally freezes the pre-trained CARL model parameters
+    - Trains a small classification head, with optional backbone fine-tuning
     - Uses data augmentation (crop, flip) for robustness
     - Logs mean IoU as the validation metric
     
     Attributes:
-        model: Frozen pre-trained CARL model
+        model: Pre-trained CARL model
         classifier: Trainable classification head
         conf_mat: Confusion matrix for IoU computation
         loss_fun: Cross-entropy loss function
@@ -65,9 +65,13 @@ class LinearTrainer(pl.LightningModule):
             "evaluation_kwargs/tile_batch_size", 4
         )
 
-        # Load pre-trained CARL model and freeze its parameters
+        # Load the pre-trained CARL model and optionally freeze its parameters
         self.model = CARLModel(**model_kwargs)
-        self._freeze_model_parameters()
+        self.freeze_backbone = self.config_accessor.get(
+            "training_kwargs/freeze_backbone", True
+        )
+        if self.freeze_backbone:
+            self._freeze_model_parameters()
 
         # Create trainable classification head
         self.classifier = nn.Conv2d(
@@ -98,7 +102,8 @@ class LinearTrainer(pl.LightningModule):
     def train(self, mode: bool = True) -> "LinearTrainer":
         """Set trainer mode while keeping the frozen CARL backbone in eval mode."""
         super().train(mode)
-        self.model.eval()
+        if self.freeze_backbone:
+            self.model.eval()
         return self
 
     def _build_augmentation_pipeline(self) -> K.AugmentationSequential:
@@ -307,11 +312,8 @@ class LinearTrainer(pl.LightningModule):
         # Compute per-class IoU
         union = tp + fp + fn
         iou = tp / (union + EPSILON)
-        present_classes = union > 0
-        foreground_classes = present_classes.clone()
-        foreground_classes[self.background_label] = False
-        mean_iou = iou[present_classes].mean().item()
-        foreground_miou = iou[foreground_classes].mean().item()
+        mean_iou = iou[:self.n_classes].mean().item()
+        foreground_miou = iou[1:self.n_classes].mean().item()
 
         self.log(f"{prefix}_mIoU", mean_iou, on_epoch=True)
         self.log(f"{prefix}_foreground_mIoU", foreground_miou, on_epoch=True)
@@ -323,7 +325,14 @@ class LinearTrainer(pl.LightningModule):
         Returns:
             Tuple of (optimizers, schedulers) for PyTorch Lightning.
         """
-        params = self.classifier.parameters()
+        params = (
+            self.classifier.parameters()
+            if self.freeze_backbone
+            else (
+                parameter for parameter in self.parameters()
+                if parameter.requires_grad
+            )
+        )
         lr = float(
             self.config_accessor.get("training_kwargs/learning_rate")
         )

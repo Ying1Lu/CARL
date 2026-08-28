@@ -52,9 +52,10 @@ training_kwargs:
   num_workers: 12
   evaluation_num_workers: 8
   ssl_ckpt_path: carl_ssl_checkpoint.ckpt
+  freeze_backbone: false
   monitor_metric: val_foreground_mIoU
-  log_dir: logs/hsirs_seg
-  learning_rate: 1e-3
+  log_dir: logs/hsirs_seg_fine_tuning
+  learning_rate: 1e-4
   random_resized_crop: false
 
 metric_kwargs:

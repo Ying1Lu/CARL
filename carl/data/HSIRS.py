@@ -7,6 +7,8 @@ Format: 592 scenes, each folder containing:
   - 1 RGB: {scene}_rgb.png
 """
 
+import logging
+from functools import lru_cache
 from typing import Tuple, Dict, Any, Optional
 from pathlib import Path
 
@@ -16,6 +18,14 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 NORMALIZATION_EPSILON = 1e-6
+BACKGROUND_LABEL = 0
+FIRST_FOREGROUND_LABEL = 1
+LAST_FOREGROUND_LABEL = 40
+UNKNOWN_LABEL = 41
+IGNORE_LABEL = -1
+SPLIT_NAMES = ("train", "val", "test")
+SPLIT_LOG_NAMES = ("train", "validation", "test")
+SPLIT_COUNTS = (414, 88, 90)
 
 # 33 bands: 474nm to 698nm, 7nm step
 WAVELENGTHS_NM = list(range(474, 699, 7))  # [474, 481, ..., 698]
@@ -45,6 +55,7 @@ class HSIRS(Dataset):
         image_size: int = 128,
         foreground_crop_probability: float = 0.8,
         foreground_crop_seed: int = 42,
+        split_seed: int = 42,
         background_label: int = 0,
     ):
         super().__init__()
@@ -57,6 +68,7 @@ class HSIRS(Dataset):
         self.split = split
         self.foreground_crop_probability = foreground_crop_probability
         self.foreground_crop_seed = foreground_crop_seed
+        self.split_seed = split_seed
         self.background_label = background_label
         self.wavelengths = np.array(WAVELENGTHS_UM, dtype=np.float32)
 
@@ -65,33 +77,14 @@ class HSIRS(Dataset):
 
         root = Path(root_dir)
 
-        # Check if split subfolders exist
-        split_dir = root / split
-        if split_dir.is_dir():
-            scene_dir = split_dir
-        else:
-            # No split folders — create deterministic split from all scenes
-            scene_dir = root
-
-        # Discover all scene folders (must contain seg_map)
-        all_scenes = sorted([
-            d for d in scene_dir.iterdir()
+        all_scenes = tuple(sorted([
+            d for d in root.iterdir()
             if d.is_dir() and list(d.glob("*_seg_map.png"))
-        ])
-
-        if split_dir.is_dir():
-            self.scenes = all_scenes
-        else:
-            # Deterministic split: 70/15/15
-            n = len(all_scenes)
-            n_train = int(n * 0.7)
-            n_val = int(n * 0.15)
-            if split == "train":
-                self.scenes = all_scenes[:n_train]
-            elif split == "val":
-                self.scenes = all_scenes[n_train:n_train + n_val]
-            else:  # test
-                self.scenes = all_scenes[n_train + n_val:]
+        ]))
+        split_scenes = self._build_stratified_splits(
+            str(root.resolve()), all_scenes, split_seed
+        )
+        self.scenes = list(split_scenes[SPLIT_NAMES.index(split)])
 
         self.samples = self._build_samples()
         self.foreground_sample_indices = self._build_foreground_sample_indices()
@@ -107,6 +100,7 @@ class HSIRS(Dataset):
         seg_path = next(scene_path.glob("*_seg_map.png"))
         with Image.open(seg_path) as seg_image:
             full_label = np.array(seg_image, dtype=np.int64)
+        full_label[full_label == UNKNOWN_LABEL] = IGNORE_LABEL
 
         if self.split == "train":
             top, left = self._sample_train_crop(
@@ -178,7 +172,11 @@ class HSIRS(Dataset):
         max_top = max(height - self.image_size, 0)
         max_left = max(width - self.image_size, 0)
 
-        foreground_y, foreground_x = np.where(label != self.background_label)
+        foreground_mask = (
+            (label >= FIRST_FOREGROUND_LABEL)
+            & (label <= LAST_FOREGROUND_LABEL)
+        )
+        foreground_y, foreground_x = np.where(foreground_mask)
         if force_foreground and foreground_y.size:
             selected = np.random.randint(foreground_y.size)
             pixel_y = int(foreground_y[selected])
@@ -192,3 +190,112 @@ class HSIRS(Dataset):
         top = np.random.randint(max_top + 1)
         left = np.random.randint(max_left + 1)
         return top, left
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _build_stratified_splits(
+        root_dir: str,
+        scenes: Tuple[Path, ...],
+        split_seed: int,
+    ) -> Tuple[Tuple[Path, ...], Tuple[Path, ...], Tuple[Path, ...]]:
+        """Create deterministic scene-level iterative multilabel splits."""
+        if len(scenes) != sum(SPLIT_COUNTS):
+            raise ValueError(
+                f"Expected {sum(SPLIT_COUNTS)} HSIRS scenes, found {len(scenes)} "
+                f"under {root_dir}"
+            )
+
+        pixel_counts = np.zeros((len(scenes), LAST_FOREGROUND_LABEL), dtype=np.int64)
+        for scene_idx, scene in enumerate(scenes):
+            with Image.open(next(scene.glob("*_seg_map.png"))) as image:
+                histogram = np.asarray(image.histogram(), dtype=np.int64)
+            pixel_counts[scene_idx] = histogram[
+                FIRST_FOREGROUND_LABEL:LAST_FOREGROUND_LABEL + 1
+            ]
+        presence = pixel_counts > 0
+        assignments = HSIRS._iterative_multilabel_assignment(
+            presence, np.asarray(SPLIT_COUNTS), split_seed
+        )
+        split_scenes = tuple(
+            tuple(scenes[idx] for idx in np.flatnonzero(assignments == split_idx))
+            for split_idx in range(len(SPLIT_NAMES))
+        )
+
+        logging.info("Ignored raw label: 41 -> -1")
+        for split_idx, split_name in enumerate(SPLIT_LOG_NAMES):
+            indices = assignments == split_idx
+            class_scene_counts = presence[indices].sum(axis=0)
+            class_pixel_counts = pixel_counts[indices].sum(axis=0)
+            present_classes = (
+                np.flatnonzero(class_scene_counts) + FIRST_FOREGROUND_LABEL
+            ).tolist()
+            missing_classes = (
+                np.flatnonzero(class_scene_counts == 0) + FIRST_FOREGROUND_LABEL
+            ).tolist()
+            logging.info("Number of %s scenes: %d", split_name, indices.sum())
+            logging.info("Classes present in %s: %s", split_name, present_classes)
+            logging.info(
+                "Class 1-40 scene counts in %s: %s",
+                split_name,
+                class_scene_counts.tolist(),
+            )
+            logging.info(
+                "Class 1-40 pixel counts in %s: %s",
+                split_name,
+                class_pixel_counts.tolist(),
+            )
+            logging.info("Classes missing in %s: %s", split_name, missing_classes)
+        return split_scenes
+
+    @staticmethod
+    def _iterative_multilabel_assignment(
+        presence: np.ndarray,
+        split_counts: np.ndarray,
+        seed: int,
+    ) -> np.ndarray:
+        """Assign rare labels first while matching split sizes and label ratios."""
+        rng = np.random.default_rng(seed)
+        num_scenes, num_classes = presence.shape
+        assignments = np.full(num_scenes, -1, dtype=np.int8)
+        remaining_capacity = split_counts.astype(np.int64).copy()
+        target_label_counts = np.outer(
+            split_counts / split_counts.sum(), presence.sum(axis=0)
+        )
+        remaining_label_need = target_label_counts.copy()
+        unassigned = np.ones(num_scenes, dtype=bool)
+
+        while np.any(unassigned & presence.any(axis=1)):
+            remaining_frequency = presence[unassigned].sum(axis=0)
+            available_labels = np.flatnonzero(remaining_frequency > 0)
+            rarest_frequency = remaining_frequency[available_labels].min()
+            rarest_labels = available_labels[
+                remaining_frequency[available_labels] == rarest_frequency
+            ]
+            label = int(rng.choice(rarest_labels))
+            candidates = np.flatnonzero(unassigned & presence[:, label])
+            rng.shuffle(candidates)
+
+            for scene_idx in candidates:
+                eligible = np.flatnonzero(remaining_capacity > 0)
+                label_need = remaining_label_need[eligible, label]
+                best = eligible[label_need == label_need.max()]
+                if len(best) > 1:
+                    capacity = remaining_capacity[best]
+                    best = best[capacity == capacity.max()]
+                split_idx = int(rng.choice(best))
+                assignments[scene_idx] = split_idx
+                unassigned[scene_idx] = False
+                remaining_capacity[split_idx] -= 1
+                remaining_label_need[split_idx] -= presence[scene_idx]
+
+        leftovers = np.flatnonzero(unassigned)
+        rng.shuffle(leftovers)
+        for scene_idx in leftovers:
+            eligible = np.flatnonzero(remaining_capacity > 0)
+            split_idx = int(rng.choice(eligible))
+            assignments[scene_idx] = split_idx
+            remaining_capacity[split_idx] -= 1
+
+        if np.any(remaining_capacity) or np.any(assignments < 0):
+            raise RuntimeError("Failed to create exact-size HSIRS splits")
+        return assignments

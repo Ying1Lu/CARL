@@ -57,10 +57,23 @@ def load_checkpoint(model, checkpoint_path: str, mode: str = "linear") -> None:
         state_dict, 
         strict=False
     )
-    if missing_keys:
-        logging.info(f"Missing keys: {missing_keys}")
-    if unexpected_keys:
-        logging.info(f"Unexpected keys: {unexpected_keys}")
+    logging.info("Checkpoint missing keys: %s", missing_keys)
+    logging.info("Checkpoint unexpected keys: %s", unexpected_keys)
+    backbone_prefixes = (
+        "model.embedder.",
+        "model.spectral_tf.",
+        "model.linear_connector.",
+        "model.spatial_encoder.",
+    )
+    backbone_missing_keys = [
+        key for key in missing_keys if key.startswith(backbone_prefixes)
+    ]
+    logging.info("Backbone missing keys: %d", len(backbone_missing_keys))
+    if backbone_missing_keys:
+        raise RuntimeError(
+            "CARL checkpoint is missing required backbone parameters: "
+            f"{backbone_missing_keys}"
+        )
 
 
 def setup_logging(config: dict) -> tuple:
@@ -159,6 +172,16 @@ def main(config_path: str) -> None:
     train_dataloader, val_dataloader, test_dataloader = create_dataloaders(
         train_dataset, val_dataset, test_dataset, config
     )
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    frozen_parameters = sum(
+        parameter.numel() for parameter in model.parameters()
+        if not parameter.requires_grad
+    )
+    logging.info("Number of trainable parameters: %d", trainable_parameters)
+    logging.info("Number of frozen parameters: %d", frozen_parameters)
     
     # Setup logging
     save_dir, tb_logger, timestamp = setup_logging(config)
